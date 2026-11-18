@@ -1,10 +1,17 @@
 // The token radar's model, radar-2: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
-// pre-token protocols below the watchlist floor: the early rows the radar exists to find. A protocol is
-// pre-token when its index entry records no token (no market cap, no CoinGecko id, no symbol); the
+// the highest-scoring eligible pre-token protocols: the early rows the radar exists to find. A protocol
+// is pre-token when its index entry records no token (no market cap, no CoinGecko id, no symbol); the
 // snapshot's live-token protocols are kept apart and shown as the market's own values, never mixed into
 // the ranked board.
+//
+// radar-2.1 adds one eligibility screen to the board (isRankable): a row must be a protocol that
+// could plausibly launch a new token. Bridges, staking products, exchanges, versioned pools, and
+// wrapped or staked products of a token that already trades are out, because the board ranks launches,
+// not venues or wrappers. The screen leaves 197 eligible protocols in this snapshot, so the board
+// carries 197 rows (40 watchlist + 157 early); the TVL floor no longer limits the early rows.
+// The model itself (MODEL, impliedValue) is unchanged from radar-2.
 //
 // Implied value follows only from the snapshot's own figures, and every factor is stated below:
 //
@@ -84,7 +91,7 @@ export const MODEL: ModelConstants = {
 /** The model's version label: the dashboard names it and the rules quote it. */
 export const MODEL_VERSION = 'radar-2';
 
-/** How many pre-token protocols below the watchlist floor the early radar carries, by model score. */
+/** How many eligible pre-token protocols the early radar carries, by model score. */
 export const EARLY_ROWS = 160;
 
 /** How many live-token protocols the Live token view carries, by market cap. */
@@ -241,9 +248,65 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
-/** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool. */
+/** Categories that cannot be a new token launch: bridges move value between chains, staking
+ *  products wrap a token that already trades, and an exchange is a venue, not a launch. */
+const INELIGIBLE_CATEGORIES = new Set([
+  'bridge',
+  'canonical bridge',
+  'liquid staking',
+  'liquid restaking',
+  'restaked btc',
+  'cex',
+]);
+
+/** A name that marks a wrapped or staked product of a token that already trades. */
+const WRAPPED_OR_STAKED = /wrapped|staked|staking/i;
+
+/** A category name that still marks a bridge, wrapped, or staking product even when its exact
+ *  category is not in the exclusion set (e.g. "Cross Chain Bridge", "Stablecoin Wrapper",
+ *  "Staking Pool", "Restaking"). */
+const BRIDGE_WRAP_STAKE_CATEGORY = /bridge|wrap|stak/i;
+
+/** Exchange names: a protocol named after a trading venue is that venue's product, not a launch. */
+const EXCHANGE_NAMES = [
+  'binance',
+  'coinbase',
+  'bybit',
+  'bitfinex',
+  'bitget',
+  'htx',
+  'huobi',
+  'okx',
+  'kraken',
+  'kucoin',
+  'gemini',
+  'robinhood',
+  'bitstamp',
+  'bitmart',
+  'mexc',
+  'gate',
+  'crypto.com',
+  'upbit',
+  'lbank',
+  'digifinex',
+  'phemex',
+  'bingx',
+  'bitrue',
+];
+
+/** Whether a protocol is one the board may rank: pre-token, and eligible to launch a new token —
+ *  not a bridge, a staking product, an exchange, a versioned pool, or a wrapped/staked product.
+ *  The category check also catches near-miss names ("Cross Chain Bridge", "Stablecoin Wrapper",
+ *  "Staking Pool", "Restaking") that the exact-category set misses. */
 export function isRankable(p: SnapshotProtocol): boolean {
-  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
+  if (!isPreToken(p)) return false;
+  if (INELIGIBLE_CATEGORIES.has((p.category ?? '').toLowerCase())) return false;
+  if (BRIDGE_WRAP_STAKE_CATEGORY.test(p.category ?? '')) return false;
+  if (VERSIONED.test(p.name)) return false;
+  if (WRAPPED_OR_STAKED.test(p.name)) return false;
+  const name = p.name.toLowerCase();
+  if (EXCHANGE_NAMES.some((exchange) => name.startsWith(exchange))) return false;
+  return true;
 }
 
 /** The snapshot's protocol by slug. */
@@ -278,10 +341,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const s = bySlugScore.get(slug) ?? { p, ...impliedValue(p, snapshot.as_of, model) };
     chosen.set(slug, s);
   }
-  // The early radar: the highest-scoring rankable pre-token protocols below the floor,
-  // by implied value. Never a replacement for a watchlist row.
+  // The early radar: the highest-scoring eligible pre-token protocols, by implied value.
+  // The TVL floor no longer limits it: the eligibility screen leaves 197 protocols in this
+  // snapshot, so the board takes every eligible protocol it can. Never a replacement for a
+  // watchlist row.
   const early = scoredAll
-    .filter((s) => !chosen.has(s.p.slug) && s.p.tvl_usd < snapshot.floor_usd)
+    .filter((s) => !chosen.has(s.p.slug))
     .sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0))
     .slice(0, EARLY_ROWS);
   for (const s of early) chosen.set(s.p.slug, s);
